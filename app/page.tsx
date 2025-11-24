@@ -257,6 +257,15 @@ export default function HomePage() {
                     </div>
 
                     {/* Nút xử lý */}
+                    <style>
+                        {`
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+`}
+                    </style>
+
                     <div
                         style={{
                             display: "flex",
@@ -297,7 +306,30 @@ export default function HomePage() {
                                     "0 10px 25px rgba(37,99,235,0.25), 0 0 0 1px rgba(37,99,235,0.2)";
                             }}
                         >
-                            {loading ? "Đang xử lý..." : "Xử lý"}
+                            {loading ? (
+                                <div
+                                    style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 8,
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            width: 14,
+                                            height: 14,
+                                            border: "2px solid #ffffff",
+                                            borderTop: "2px solid transparent",
+                                            borderRadius: "50%",
+                                            animation:
+                                                "spin 0.8s linear infinite",
+                                        }}
+                                    ></div>
+                                    <span>Đang xử lý...</span>
+                                </div>
+                            ) : (
+                                "Xử lý"
+                            )}
                         </button>
                     </div>
                 </section>
