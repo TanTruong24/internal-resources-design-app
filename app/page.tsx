@@ -2,25 +2,53 @@
 
 import { useState } from "react";
 import dynamic from "next/dynamic";
+import PromptSection from "../components/PromptSection";
+import ControlBar from "../components/ControlBar";
+import ResultModal from "../components/ResultModal";
 
 // Component preview PDF chỉ chạy client
 const PdfPreview = dynamic(() => import("../components/PdfPreview"), {
     ssr: false,
 });
 
+type TableData = {
+    headers: string[];
+    rows: Record<string, (number | null)[]>;
+};
+
+const OUTPUT_FORMAT_BLOCK = `Output Format
+Return only the following Markdown table, with each cell filled by either a numeric value or "null".
+Do not add explanations or text other than the table.
+
+| Axis | X1 | X2 | X3 | X4 | X5 | X6 | X7 | X8 | X9 | X10 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Y1** | | | | | | | | | | |
+| **Y2** | | | | | | | | | | |
+| **Y3** | | | | | | | | | | |
+| **Y4** | | | | | | | | | | |
+| **Y5** | | | | | | | | | | |
+| **Y6** | | | | | | | | | | |`;
+
 export default function HomePage() {
     const [file, setFile] = useState<File | null>(null);
     const [pages, setPages] = useState<string>("");
+    const [prompt, setPrompt] = useState<string>("");
+    const [usePrompt, setUsePrompt] = useState<boolean>(false); //
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [processingTimeMs, setProcessingTimeMs] = useState<number | null>(
         null
-    ); // ⏱
+    );
+    const [resultMarkdown, setResultMarkdown] = useState<string | null>(null);
+    const [showResultModal, setShowResultModal] = useState(false);
+    const [tableData, setTableData] = useState<TableData | null>(null);
 
     const API_BASE = process.env.NEXT_PUBLIC_API_BASE;
 
     const handleSubmit = async () => {
         setError(null);
+        setResultMarkdown(null);
+        setShowResultModal(false);
 
         if (!file) {
             setError("Bạn chưa chọn file PDF.");
@@ -37,13 +65,13 @@ export default function HomePage() {
             .map((p) => p.trim())
             .filter(Boolean);
 
-        if (pagesList.length > 5) {
-            setError("Chỉ được chọn tối đa 5 trang!");
+        if (pagesList.length > 10) {
+            setError("Chỉ được chọn tối đa 10 trang!");
             return;
         }
 
-        const start = performance.now(); // bắt đầu đo
-        setProcessingTimeMs(null); // reset kết quả cũ
+        const start = performance.now();
+        setProcessingTimeMs(null);
         setLoading(true);
 
         try {
@@ -51,32 +79,71 @@ export default function HomePage() {
             form.append("file", file);
             form.append("pages", pages);
 
+            // Build final prompt: luôn kèm block Output Format
+            // Chỉ gửi prompt nếu user đã bật dấu tích
+            if (usePrompt) {
+                let finalPrompt: string;
+
+                if (prompt && prompt.trim()) {
+                    finalPrompt = `${prompt.trim()}\n\n${OUTPUT_FORMAT_BLOCK}`;
+                } else {
+                    // Người dùng bật nhưng chưa nhập gì → vẫn gửi riêng block Output Format
+                    finalPrompt = OUTPUT_FORMAT_BLOCK;
+                }
+
+                form.append("prompt", finalPrompt);
+            }
+
             const res = await fetch(`${API_BASE}/process`, {
                 method: "POST",
                 body: form,
             });
 
             if (!res.ok) {
-                const msg = await res.text();
-                throw new Error(msg);
+                // cố thử parse json error, nếu fail thì dùng text
+                let message = "Đã xảy ra lỗi.";
+                const contentType = res.headers.get("content-type") ?? "";
+                if (contentType.includes("application/json")) {
+                    const errJson = await res.json().catch(() => null);
+                    if (errJson?.detail) message = errJson.detail;
+                } else {
+                    const textErr = await res.text().catch(() => "");
+                    if (textErr) message = textErr;
+                }
+                throw new Error(message);
             }
 
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
+            // Hỗ trợ cả JSON ({ markdown } | { result }) lẫn text thuần
+            const contentType = res.headers.get("content-type") ?? "";
+            let markdown = "";
+            if (contentType.includes("application/json")) {
+                const data: any = await res.json();
 
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = "vertical_V.csv";
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
+                // Trường hợp cũ: backend vẫn trả markdown/result
+                const markdown = data.markdown ?? data.result ?? "";
 
-            URL.revokeObjectURL(url);
+                // Trường hợp mới: backend trả headers + rows
+                if (data.headers && data.rows) {
+                    setTableData({
+                        headers: data.headers,
+                        rows: data.rows,
+                    });
+                } else {
+                    // fallback: vẫn xử lý markdown như cũ
+                    setResultMarkdown(markdown);
+                }
+            } else {
+                // Trường hợp backend trả text thuần (markdown)
+                const markdown = await res.text();
+                setResultMarkdown(markdown);
+            }
+
+            setResultMarkdown(markdown);
         } catch (err: any) {
             setError(err.message || "Đã xảy ra lỗi.");
         } finally {
             const end = performance.now();
-            setProcessingTimeMs(end - start); // lưu thời gian xử lý
+            setProcessingTimeMs(end - start);
             setLoading(false);
         }
     };
@@ -120,219 +187,32 @@ export default function HomePage() {
                         }}
                     >
                         Chọn file PDF, xem preview các trang, chọn trực tiếp
-                        hoặc nhập số trang cần xử lý. Kết quả sẽ được tải về
-                        dưới dạng file CSV.
+                        hoặc nhập số trang cần xử lý. Hệ thống sẽ gửi prompt (có
+                        thể tùy chỉnh) sang backend, kết quả trả về dạng bảng
+                        Markdown và bạn có thể xem trực tiếp trong ứng dụng.
                     </p>
                 </header>
 
+                {/* Prompt tùy chỉnh */}
+                <PromptSection
+                    prompt={prompt}
+                    onPromptChange={setPrompt}
+                    outputFormat={OUTPUT_FORMAT_BLOCK}
+                    usePrompt={usePrompt} //
+                    onUsePromptChange={setUsePrompt}
+                />
+
                 {/* Hàng điều khiển: trang + upload + nút xử lý */}
-                <section
-                    style={{
-                        display: "grid",
-                        gridTemplateColumns:
-                            "minmax(0, 2fr) minmax(0, 1.6fr) auto",
-                        gap: 20,
-                        alignItems: "end",
-                    }}
-                >
-                    {/* Input pages */}
-                    <div>
-                        <label
-                            style={{
-                                display: "block",
-                                fontSize: 14,
-                                fontWeight: 600,
-                                color: "#111827",
-                                marginBottom: 6,
-                            }}
-                        >
-                            Trang cần xử lý
-                            <span style={{ color: "#9ca3af", fontWeight: 400 }}>
-                                {" "}
-                                (VD: 1 hoặc 2,3,4)
-                            </span>
-                        </label>
-                        <input
-                            value={pages}
-                            onChange={(e) => setPages(e.target.value)}
-                            placeholder="Nhập số trang, phân tách bằng dấu phẩy…"
-                            style={{
-                                width: "100%",
-                                padding: "10px 12px",
-                                borderRadius: 10,
-                                border: "1px solid #d1d5db",
-                                fontSize: 14,
-                                outline: "none",
-                                transition:
-                                    "border-color 0.15s ease, box-shadow 0.15s ease",
-                            }}
-                            onFocus={(e) => {
-                                e.currentTarget.style.borderColor = "#2563eb";
-                                e.currentTarget.style.boxShadow =
-                                    "0 0 0 1px rgba(37,99,235,0.12)";
-                            }}
-                            onBlur={(e) => {
-                                e.currentTarget.style.borderColor = "#d1d5db";
-                                e.currentTarget.style.boxShadow = "none";
-                            }}
-                        />
-                    </div>
-
-                    {/* Upload PDF */}
-                    <div>
-                        <label
-                            style={{
-                                display: "block",
-                                fontSize: 14,
-                                fontWeight: 600,
-                                color: "#111827",
-                                marginBottom: 6,
-                            }}
-                        >
-                            Chọn file PDF
-                        </label>
-
-                        <label
-                            style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: 8,
-                                padding: "9px 14px",
-                                borderRadius: 999,
-                                border: "1px dashed #d1d5db",
-                                fontSize: 13,
-                                cursor: "pointer",
-                                background: "#f9fafb",
-                                color: "#374151",
-                                maxWidth: "100%",
-                            }}
-                        >
-                            <span
-                                style={{
-                                    display: "inline-flex",
-                                    width: 18,
-                                    height: 18,
-                                    borderRadius: "999px",
-                                    border: "2px solid #2563eb",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    fontSize: 11,
-                                    color: "#2563eb",
-                                    flexShrink: 0,
-                                }}
-                            >
-                                +
-                            </span>
-                            <span
-                                style={{
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                    whiteSpace: "nowrap",
-                                }}
-                            >
-                                {file ? (
-                                    <>
-                                        <strong>{file.name}</strong>{" "}
-                                        <span style={{ color: "#9ca3af" }}>
-                                            (
-                                            {(file.size / 1024 / 1024).toFixed(
-                                                2
-                                            )}{" "}
-                                            MB)
-                                        </span>
-                                    </>
-                                ) : (
-                                    "Chọn file từ máy của bạn"
-                                )}
-                            </span>
-                            <input
-                                type="file"
-                                accept="application/pdf"
-                                style={{ display: "none" }}
-                                onChange={(e) =>
-                                    setFile(e.target.files?.[0] ?? null)
-                                }
-                            />
-                        </label>
-                    </div>
-
-                    {/* Nút xử lý */}
-                    <style>
-                        {`
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-`}
-                    </style>
-
-                    <div
-                        style={{
-                            display: "flex",
-                            justifyContent: "flex-end",
-                        }}
-                    >
-                        <button
-                            onClick={handleSubmit}
-                            disabled={loading}
-                            style={{
-                                padding: "10px 20px",
-                                borderRadius: 999,
-                                border: "none",
-                                fontSize: 14,
-                                fontWeight: 500,
-                                background: loading ? "#93c5fd" : "#2563eb",
-                                color: "#ffffff",
-                                cursor: loading ? "default" : "pointer",
-                                boxShadow:
-                                    "0 10px 25px rgba(37,99,235,0.25), 0 0 0 1px rgba(37,99,235,0.2)",
-                                transition:
-                                    "transform 0.1s ease, box-shadow 0.1s ease, background 0.1s ease",
-                                whiteSpace: "nowrap",
-                                minWidth: 96,
-                            }}
-                            onMouseDown={(e) => {
-                                if (loading) return;
-                                e.currentTarget.style.transform =
-                                    "translateY(1px)";
-                                e.currentTarget.style.boxShadow =
-                                    "0 4px 12px rgba(37,99,235,0.35)";
-                            }}
-                            onMouseUp={(e) => {
-                                if (loading) return;
-                                e.currentTarget.style.transform =
-                                    "translateY(0)";
-                                e.currentTarget.style.boxShadow =
-                                    "0 10px 25px rgba(37,99,235,0.25), 0 0 0 1px rgba(37,99,235,0.2)";
-                            }}
-                        >
-                            {loading ? (
-                                <div
-                                    style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: 8,
-                                    }}
-                                >
-                                    <div
-                                        style={{
-                                            width: 14,
-                                            height: 14,
-                                            border: "2px solid #ffffff",
-                                            borderTop: "2px solid transparent",
-                                            borderRadius: "50%",
-                                            animation:
-                                                "spin 0.8s linear infinite",
-                                        }}
-                                    ></div>
-                                    <span>Đang xử lý...</span>
-                                </div>
-                            ) : (
-                                "Xử lý"
-                            )}
-                        </button>
-                    </div>
-                </section>
+                <ControlBar
+                    pages={pages}
+                    onPagesChange={setPages}
+                    file={file}
+                    onFileChange={setFile}
+                    loading={loading}
+                    onSubmit={handleSubmit}
+                    hasResult={!!(resultMarkdown || tableData)}
+                    onOpenResult={() => setShowResultModal(true)}
+                />
 
                 {/* Error */}
                 {error && (
@@ -350,7 +230,7 @@ export default function HomePage() {
                     </div>
                 )}
 
-                {/* Thời gian xử lý – nằm TRÊN phần preview */}
+                {/* Thời gian xử lý */}
                 {processingTimeMs !== null &&
                     (() => {
                         const totalSeconds = processingTimeMs / 1000;
@@ -383,7 +263,7 @@ export default function HomePage() {
                         );
                     })()}
 
-                {/* Preview */}
+                {/* Preview PDF */}
                 {file && (
                     <section style={{ marginTop: 16 }}>
                         <PdfPreview
@@ -394,6 +274,14 @@ export default function HomePage() {
                         />
                     </section>
                 )}
+
+                {/* Modal kết quả */}
+                <ResultModal
+                    open={showResultModal && !!(resultMarkdown || tableData)}
+                    markdown={resultMarkdown ?? ""}
+                    tableData={tableData ?? null}  
+                    onClose={() => setShowResultModal(false)}
+                />
             </div>
         </div>
     );
